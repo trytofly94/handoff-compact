@@ -47,6 +47,7 @@ const ADAPTER_CACHE_MS = 5 * 60 * 1000
 
 let opts = { threshold: 70, window: 0, keepVerbatim: 10, autoContinue: 'never', precompute: 'skip', handoffDir: '', outlineFile: '', adapter: '' }
 let armed = true // false while a compaction this mod started is running
+let due = false // the threshold was crossed; compact when the main turn ends
 let cooldownUntil = 0 // after a failed attempt, don't retry on every turn
 let pending = null // handoff built by run(), installed by the session.compact hook
 let consumed = false // did the session.compact hook install `pending`?
@@ -243,18 +244,30 @@ async function run($) {
 export function register(on, options) {
   opts = { ...opts, ...(options || {}) }
 
-  // After each turn Claude Code measures the context; compare with our threshold.
+  // Claude Code measures the context after every response, i.e. also in the
+  // middle of a turn, while $.session.compact() is refused. So the measurement
+  // only marks the compaction as due; turn.complete starts it.
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
-    if (!armed || Date.now() < cooldownUntil) return result
+    if (!armed || due || Date.now() < cooldownUntil) return result
     const used = e.context && e.context.tokens
     if (!used) return result
     const adapter = await askAdapter($, 'check', { trigger: null, context: e.context })
     const window = await compactWindow($, adapter, e.context.window)
     const threshold = Number(adapter.threshold) || opts.threshold
     if (!window || (100 * used) / window < threshold) return result
+    due = true
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    // A subagent's turn is not the end of the session's turn; an interrupted or
+    // failed turn means someone is busy with the session: wait for the next end.
+    if (e.agentId || !due || !armed || e.reason !== 'answer') return result
+    due = false
     armed = false
-    // Not inside this hook: it still belongs to the measurement.
+    // Not inside this hook: the turn still ends through it.
     $.clock.after(0, () => run($))
     return result
   })

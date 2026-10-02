@@ -1,5 +1,5 @@
 // Run with `claude plugin test` in this directory (Claude Code 2.1.287+, mods enabled).
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const MESSAGES = [
   { role: 'user', text: 'Rework the export', toolUses: [] },
@@ -71,4 +71,55 @@ test("a subagent's compaction goes to Claude Code unchanged", async ($, on) => {
   on('session.compact', () => ({ messages: [{ role: 'user', text: 'CORE', toolUses: [] }] }))
   const r = await $.session.compact({ trigger: 'auto', agentId: 'a1', messages: MESSAGES })
   expect(r.messages[0].text).toBe('CORE')
+})
+
+// ── Compacting on our own: the threshold is measured mid-turn, the compaction waits for the turn's end ──
+
+const OWN = { options: { threshold: 50, window: 100000 } }
+const MEASURE = { context: { tokens: 60000, window: 1000000, percent: 6 }, rateLimits: [], changed: ['context'] }
+const END = { answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' }
+
+function own(on) {
+  const clock = mock.clock(on)
+  const seen = { compacts: 0, submits: [] as string[] }
+  stubs(on)
+  on('session.messages', () => ({ value: MESSAGES }))
+  on('session.compact', () => { seen.compacts++; return { messages: [{ role: 'user', text: 'CORE', toolUses: [] }] } })
+  on('prompt.submit', ($, e) => { seen.submits.push(e.text); return { text: e.text } })
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  return { clock, seen }
+}
+
+test('crossing the threshold mid-turn compacts only once the main turn ends', OWN, async ($, on) => {
+  const { clock, seen } = own(on)
+  await $.session.measure(MEASURE)
+  await clock.advance(0)
+  expect(seen.compacts).toBe(0)
+  await $.turn.complete({ ...END, agentId: 'a1' }) // a subagent's turn
+  await clock.advance(0)
+  expect(seen.compacts).toBe(0)
+  await $.turn.complete(END)
+  await clock.advance(0)
+  expect(seen.compacts).toBe(1)
+})
+
+test('an interrupted turn does not compact; the next answered one does', OWN, async ($, on) => {
+  const { clock, seen } = own(on)
+  await $.session.measure(MEASURE)
+  await $.turn.complete({ ...END, reason: 'aborted', isAborted: true })
+  await clock.advance(0)
+  expect(seen.compacts).toBe(0)
+  await $.turn.complete({ ...END, turnId: 't2' })
+  await clock.advance(0)
+  expect(seen.compacts).toBe(1)
+})
+
+test('below the threshold a turn end does not compact', OWN, async ($, on) => {
+  const { clock, seen } = own(on)
+  await $.session.measure({ ...MEASURE, context: { tokens: 40000, window: 1000000, percent: 4 } })
+  await $.turn.complete(END)
+  await clock.advance(0)
+  expect(seen.compacts).toBe(0)
 })

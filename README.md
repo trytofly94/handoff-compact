@@ -23,8 +23,10 @@ warning, and still ends in a second, generic summary.
 
 ## How it works
 
-1. **Trigger.** After each turn the mod compares the context fill with `threshold` % of the
-   compact window. It also handles `/compact` and Claude Code's own automatic compaction,
+1. **Trigger.** Claude Code measures the context after every response, also in the middle of
+   a turn. Once the fill crosses `threshold` % of the compact window, the mod compacts as soon
+   as the main turn ends with an answer (not after a subagent's turn, an interrupt or an
+   error). It also handles `/compact` and Claude Code's own automatic compaction,
    so every compaction goes through the same path.
 2. **Handoff.** A *fork* of the session (`$.model.fork`) writes the handoff along a fixed
    outline. The fork reads the conversation from the prompt cache and has no tools, so the
@@ -134,7 +136,8 @@ decision in its own function with a comment saying what it decides. After a chan
 - The handoff costs one fork per compaction. That is mostly cache reads plus the handoff's
   own output, about the cost of the summary Claude Code would otherwise write.
 - A compaction the mod starts happens between turns. If a new turn starts while the fork is
-  writing, the attempt is dropped and retried two minutes later.
+  writing, the attempt is dropped and retried at the end of a later turn (at the earliest two
+  minutes on).
 
 ## License
 
