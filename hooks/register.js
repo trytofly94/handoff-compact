@@ -1,0 +1,278 @@
+// handoff-compact — compact a Claude Code session into a structured handoff.
+//
+// Claude Code compacts a long conversation by summarizing it with its own
+// prompt. That summary keeps what seems important to a summarizer and tends to
+// drop what the next stretch of work needs most: the reason behind a decision,
+// the approaches already ruled out, the exact command that proves the state.
+//
+// This mod answers the compaction itself:
+//   1. Once the context fills `threshold` % of the compact window (or whenever
+//      Claude Code compacts on its own, or you run /compact), a FORK of the
+//      session writes a handoff along a fixed outline. The fork reads the
+//      conversation from the prompt cache and has no tools.
+//   2. The last N prompts and answers are added word for word, plus the paths
+//      of files that hold the project's state (from the optional adapter).
+//   3. The conversation is replaced by that one handoff message. The handoff is
+//      also saved as a Markdown file.
+//   4. Optionally the session continues on its own.
+//
+// Safety net: if the fork fails (cold cache, API error) the mod hands the
+// compaction back to Claude Code, with the outline as instructions. If this
+// module throws, Claude Code skips it and compacts as usual.
+//
+// Customizing: everything a user is likely to change is an option in
+// plugin.json (userConfig) or a function below with a comment saying what it
+// decides. The adapter (see README.md) connects the mod to your own setup
+// without editing this file.
+
+// The outline every handoff must follow. Replace it with the `outlineFile`
+// option rather than editing it here, so updates of the mod don't undo it.
+const DEFAULT_OUTLINE = [
+  '1. GOAL: what should exist at the end, in one sentence.',
+  '2. STATE: what is done, and what proves it (test, command, commit).',
+  '3. IN PROGRESS: which step, which file, and why this one.',
+  '4. NEXT STEP: concrete enough for a stranger to carry out.',
+  '5. DECISIONS AND REASONS: what the code itself does not tell.',
+  '6. RULED OUT: approaches tried or rejected, so nobody tries them again.',
+  '7. BLOCKED / OPEN QUESTIONS: including what you meant to ask the user.',
+  '8. FILES AND COMMITS TOUCHED.',
+  '9. VERIFY: the command that shows whether the state is what this says.',
+]
+
+const CONTINUE_TEXT =
+  'The session was compacted; the handoff above replaces the earlier conversation. ' +
+  'Read the state files it lists first, then carry on with its NEXT STEP.'
+
+const ADAPTER_CACHE_MS = 5 * 60 * 1000
+
+let opts = { threshold: 70, window: 0, keepVerbatim: 10, autoContinue: 'never', precompute: 'skip', handoffDir: '', outlineFile: '', adapter: '' }
+let armed = true // false while a compaction this mod started is running
+let cooldownUntil = 0 // after a failed attempt, don't retry on every turn
+let pending = null // handoff built by run(), installed by the session.compact hook
+let consumed = false // did the session.compact hook install `pending`?
+let adapterCache = null // { at, value } from the last 'check' call
+
+// ── Small helpers ──────────────────────────────────────────────────────────────
+function parseWindow(raw) {
+  // Same grammar as Claude Code's --autocompact: "200000", "200k", "200" (= thousands)
+  if (raw === undefined || raw === null || raw === '') return null
+  const s = String(raw).trim()
+  if (!s || s.length > 8) return null
+  const suffix = /[kK]$/.test(s)
+  const digits = suffix ? s.slice(0, -1) : s
+  if (!/^\d+$/.test(digits)) return null
+  let n = parseInt(digits, 10)
+  if (suffix || n <= 1000) n *= 1000
+  return n >= 20000 && n <= 1000000 ? n : null
+}
+
+async function readJson($, path) {
+  try {
+    if (!(await $.fs.exists(path))) return null
+    return JSON.parse(await $.fs.read(path))
+  } catch {
+    return null
+  }
+}
+
+function expandHome(path, home) {
+  return path && path.startsWith('~/') ? home + path.slice(1) : path
+}
+
+function stripReminders(text) {
+  return String(text || '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+}
+
+function clip(text, max) {
+  return text.length > max ? text.slice(0, max) + ' […]' : text
+}
+
+// ── The adapter: your setup's answers, as JSON over stdin/stdout ───────────────
+// Called with { version, phase, sessionId, cwd, trigger, context } on stdin.
+// May answer { window, threshold, stateFiles: [{label, path}], autoContinue, notes }.
+// Any failure (missing, non-zero exit, bad JSON, timeout) counts as "no answer".
+async function askAdapter($, phase, extra) {
+  if (!opts.adapter) return {}
+  if (phase === 'check' && adapterCache && Date.now() - adapterCache.at < ADAPTER_CACHE_MS) return adapterCache.value
+  let value = {}
+  try {
+    const home = await $.env.get('HOME')
+    const input = JSON.stringify({ version: 1, phase, sessionId: await $.session.id(), cwd: await $.session.cwd(), ...extra })
+    const r = await $.process.run([expandHome(opts.adapter, home)], { stdin: input, timeoutMs: 10000 })
+    if (r.exitCode === 0 && r.stdout.trim()) value = JSON.parse(r.stdout) || {}
+  } catch (err) {
+    $.ui.log('handoff-compact: adapter failed: ' + String(err), { to: 'debug' })
+  }
+  if (phase === 'check') adapterCache = { at: Date.now(), value }
+  return value
+}
+
+// Which window the threshold is measured against. Decides WHEN this mod acts.
+async function compactWindow($, adapter, contextWindow) {
+  if (opts.window) return opts.window
+  const fromAdapter = parseWindow(adapter.window)
+  if (fromAdapter) return fromAdapter
+  const fromEnv = parseWindow(await $.env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW'))
+  if (fromEnv) return fromEnv
+  const settings = await readJson($, (await $.env.get('HOME')) + '/.claude/settings.json')
+  return (settings && parseWindow(settings.autoCompactWindow)) || contextWindow || null
+}
+
+// ── Building the handoff ───────────────────────────────────────────────────────
+async function outline($) {
+  if (!opts.outlineFile) return DEFAULT_OUTLINE
+  try {
+    const text = await $.fs.read(expandHome(opts.outlineFile, await $.env.get('HOME')))
+    const lines = text.split('\n').map(l => l.trimEnd()).filter(l => l.trim())
+    return lines.length ? lines : DEFAULT_OUTLINE
+  } catch {
+    return DEFAULT_OUTLINE
+  }
+}
+
+// The latest n prompts and answers, verbatim: the part of the handoff that
+// doesn't depend on the model remembering it.
+function verbatimTail(messages, n) {
+  if (!n) return { prompts: [], answers: [] }
+  const list = Array.isArray(messages) ? messages : []
+  const prompts = list
+    .filter(m => m.role === 'user' && !(m.toolResults && m.toolResults.length))
+    .map(m => stripReminders(m.text))
+    .filter(Boolean)
+    .slice(-n)
+    .map(t => clip(t, 1000))
+  const answers = list
+    .filter(m => m.role === 'assistant')
+    .map(m => stripReminders(m.text))
+    .filter(Boolean)
+    .slice(-n)
+    .map(t => clip(t, 600))
+  return { prompts, answers }
+}
+
+function forkPrompt(sections, instructions) {
+  return [
+    'Write the handoff for this session NOW. It is about to replace the entire conversation;',
+    'whatever it leaves out is gone afterwards. Use no tools, reply with the handoff only.',
+    'Prefer exact paths, commands, commit hashes and numbers over descriptions.',
+    'Write in the language the conversation is in.',
+    '',
+    'Outline. Every section must appear, with "nothing" if that is the answer:',
+    ...sections,
+    ...(instructions ? ['', 'When compacting, the user asked to stress: ' + instructions] : []),
+  ].join('\n')
+}
+
+async function buildHandoff($, messages, trigger, instructions) {
+  const sections = await outline($)
+  const fork = await $.model.fork({ prompt: forkPrompt(sections, instructions) })
+  if (!fork || !fork.text || !fork.text.trim()) return null
+  const home = await $.env.get('HOME')
+  const id = await $.session.id()
+  const adapter = await askAdapter($, 'compact', { trigger })
+  const files = Array.isArray(adapter.stateFiles) ? adapter.stateFiles.filter(f => f && f.path) : []
+  const tail = verbatimTail(messages, opts.keepVerbatim)
+  const now = new Date().toISOString()
+
+  const doc = [
+    '# Handoff ' + now + ' (' + trigger + ')',
+    '',
+    fork.text.trim(),
+    ...(adapter.notes ? ['', String(adapter.notes).trim()] : []),
+    '',
+    '## State files: read these before continuing',
+    ...(files.length ? files.map(f => '- ' + (f.label || 'file') + ': ' + f.path) : ['- none listed']),
+    '',
+    '## Last ' + tail.prompts.length + ' user prompts (verbatim, oldest first)',
+    ...tail.prompts.map(t => '> ' + t.replace(/\n/g, '\n> ') + '\n'),
+    '## Last ' + tail.answers.length + ' answers (shortened, oldest first)',
+    ...tail.answers.map(t => '- ' + t.replace(/\n/g, ' ')),
+  ].join('\n')
+
+  // The file is a copy for people and for later. If writing it fails, the
+  // message below still carries the handoff, so this doesn't abort.
+  const dir = expandHome(opts.handoffDir, home) || home + '/.claude/handoffs'
+  const path = dir + '/' + id + '-' + now.replace(/[:.]/g, '-') + '.md'
+  try {
+    await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5000 })
+    await $.fs.write(path, doc + '\n')
+  } catch {}
+
+  const message = '[handoff-compact] This session was compacted. The handoff below replaces the earlier conversation (saved at ' + path + ').\n\n' + doc
+  return { message, path, usage: fork.usage, autoContinue: adapter.autoContinue === true }
+}
+
+// Whether to start the next turn by itself after a compaction this mod started.
+function shouldContinue(handoff) {
+  if (opts.autoContinue === 'always') return true
+  if (opts.autoContinue === 'adapter') return !!(handoff && handoff.autoContinue)
+  return false
+}
+
+// ── Compacting on our own, between turns ──────────────────────────────────────
+async function run($) {
+  try {
+    const handoff = await buildHandoff($, await $.session.messages(), 'plugin')
+    pending = handoff
+    consumed = false
+    const r = await $.session.compact(handoff ? {} : { instructions: (await outline($)).join('\n') })
+    if (r && r.skip) {
+      $.ui.log('handoff-compact: compaction refused: ' + r.skip, { to: 'debug' })
+      cooldownUntil = Date.now() + 10 * 60 * 1000
+      return
+    }
+    // If our own session.compact hook did not answer (Claude Code summarized
+    // instead), deliver the handoff as the next message so it isn't lost.
+    if (handoff && !consumed) {
+      $.prompt.submit({ text: handoff.message + '\n\n' + CONTINUE_TEXT })
+    } else if (shouldContinue(handoff)) {
+      $.prompt.submit({ text: CONTINUE_TEXT })
+    }
+    if (handoff) $.ui.toast('Compacted into a handoff: ' + handoff.path)
+  } catch (err) {
+    // Typically a new turn had already started (compact refuses then).
+    // Try again on a later measurement, not on every turn.
+    $.ui.log('handoff-compact: ' + String(err), { to: 'debug' })
+    cooldownUntil = Date.now() + 2 * 60 * 1000
+  } finally {
+    pending = null
+    armed = true
+  }
+}
+
+export function register(on, options) {
+  opts = { ...opts, ...(options || {}) }
+
+  // After each turn Claude Code measures the context; compare with our threshold.
+  on('session.measure', async ($, e, next) => {
+    const result = await next(e)
+    if (!armed || Date.now() < cooldownUntil) return result
+    const used = e.context && e.context.tokens
+    if (!used) return result
+    const adapter = await askAdapter($, 'check', { trigger: null, context: e.context })
+    const window = await compactWindow($, adapter, e.context.window)
+    const threshold = Number(adapter.threshold) || opts.threshold
+    if (!window || (100 * used) / window < threshold) return result
+    armed = false
+    // Not inside this hook: it still belongs to the measurement.
+    $.clock.after(0, () => run($))
+    return result
+  })
+
+  // Every compaction passes here: ours, /compact, and Claude Code's own.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId) return next(e) // subagents compact their own transcript the usual way
+    if (e.trigger === 'precompute') {
+      return opts.precompute === 'core' ? next(e) : { skip: 'handoff-compact writes the handoff at compaction time' }
+    }
+    let handoff = pending
+    if (handoff) consumed = true
+    else handoff = await buildHandoff($, e.messages, e.trigger, e.instructions)
+    if (!handoff) {
+      const sections = (await outline($)).join('\n')
+      const instructions = e.instructions ? e.instructions + '\n\n' + sections : 'Structure the summary exactly along these sections:\n' + sections
+      return next({ ...e, instructions })
+    }
+    return { messages: [{ role: 'user', text: handoff.message, toolUses: [] }] }
+  })
+}

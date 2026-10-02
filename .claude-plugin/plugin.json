@@ -1,0 +1,61 @@
+{
+  "name": "handoff-compact",
+  "version": "0.1.0",
+  "description": "Replaces Claude Code's compaction with a structured handoff: a fork of the session writes it from the prompt cache, and the conversation continues from exactly that handoff.",
+  "author": { "name": "trytofly94" },
+  "license": "MIT",
+  "keywords": ["mod", "compact", "handoff", "context", "tokens"],
+  "userConfig": {
+    "threshold": {
+      "type": "number",
+      "title": "Threshold (%)",
+      "description": "Compact once the context fills this share of the compact window.",
+      "default": 70,
+      "min": 20,
+      "max": 95
+    },
+    "window": {
+      "type": "number",
+      "title": "Compact window (tokens)",
+      "description": "0 = automatic: adapter, then CLAUDE_CODE_AUTO_COMPACT_WINDOW, then autoCompactWindow in settings.json, then the model's context window.",
+      "default": 0,
+      "min": 0,
+      "max": 1000000
+    },
+    "keepVerbatim": {
+      "type": "number",
+      "title": "Verbatim prompts/answers",
+      "description": "How many of the latest user prompts and assistant answers go into the handoff word for word.",
+      "default": 10,
+      "min": 0,
+      "max": 30
+    },
+    "autoContinue": {
+      "type": "string",
+      "title": "Continue after compacting",
+      "description": "never | always | adapter (the adapter decides per session). Applies to compactions this mod starts itself.",
+      "default": "never"
+    },
+    "precompute": {
+      "type": "string",
+      "title": "Claude Code's background pre-compaction",
+      "description": "skip = turn it off (saves the tokens of a summary this mod replaces anyway) | core = leave it on.",
+      "default": "skip"
+    },
+    "handoffDir": {
+      "type": "directory",
+      "title": "Handoff directory",
+      "description": "Where each handoff is saved as a Markdown file. Empty = ~/.claude/handoffs."
+    },
+    "outlineFile": {
+      "type": "file",
+      "title": "Outline file",
+      "description": "A text file with the sections every handoff must have, one per line. Empty = the built-in nine-point outline."
+    },
+    "adapter": {
+      "type": "file",
+      "title": "Adapter command",
+      "description": "Optional executable that tells the mod about your setup (window, state files, whether to continue). Protocol in README.md."
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "handoff-compact",
+  "description": "Claude Code mod: compaction through a structured handoff",
+  "owner": { "name": "trytofly94" },
+  "plugins": [
+    {
+      "name": "handoff-compact",
+      "source": ".",
+      "description": "Replaces Claude Code's compaction with a structured handoff written by a fork of the session from the prompt cache."
+    }
+  ]
+}
