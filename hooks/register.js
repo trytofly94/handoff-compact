@@ -138,23 +138,46 @@ async function outline($) {
   }
 }
 
+const HANDOFF_PREFIX = '[handoff-compact]'
+
 // The latest n prompts and answers, verbatim: the part of the handoff that
-// doesn't depend on the model remembering it.
+// doesn't depend on the model remembering it. A previous handoff in the
+// conversation is no prompt of the user's: its own verbatim tail is carried
+// over instead, so the user's words survive any number of compactions.
 function verbatimTail(messages, n) {
   if (!n) return { prompts: [], answers: [] }
   const list = Array.isArray(messages) ? messages : []
-  const prompts = list
-    .filter(m => m.role === 'user' && !(m.toolResults && m.toolResults.length))
-    .map(m => stripReminders(m.text))
+  const prompts = []
+  const answers = []
+  for (const m of list) {
+    const text = stripReminders(m.text)
+    if (m.role === 'user' && !(m.toolResults && m.toolResults.length)) {
+      if (text.startsWith(HANDOFF_PREFIX)) {
+        const carried = carriedTail(text)
+        prompts.push(...carried.prompts)
+        answers.push(...carried.answers)
+      } else if (text) prompts.push(clip(text, 1000))
+    } else if (m.role === 'assistant' && text) answers.push(clip(text, 600))
+  }
+  return { prompts: prompts.slice(-n), answers: answers.slice(-n) }
+}
+
+// Reads the verbatim tail back out of a handoff this mod wrote (see the
+// sections at the end of buildHandoff).
+function carriedTail(text) {
+  const p = [...text.matchAll(/^## Last \d+ user prompts \(verbatim, oldest first\)$/gm)].pop()
+  const a = [...text.matchAll(/^## Last \d+ answers \(shortened, oldest first\)$/gm)].pop()
+  if (!p || !a || a.index < p.index) return { prompts: [], answers: [] }
+  const prompts = text
+    .slice(p.index + p[0].length, a.index)
+    .split(/\n\s*\n/)
+    .map(block => block.split('\n').filter(l => l.startsWith('>')).map(l => l.replace(/^> ?/, '')).join('\n').trim())
     .filter(Boolean)
-    .slice(-n)
-    .map(t => clip(t, 1000))
-  const answers = list
-    .filter(m => m.role === 'assistant')
-    .map(m => stripReminders(m.text))
-    .filter(Boolean)
-    .slice(-n)
-    .map(t => clip(t, 600))
+  const answers = text
+    .slice(a.index + a[0].length)
+    .split('\n')
+    .filter(l => l.startsWith('- '))
+    .map(l => l.slice(2))
   return { prompts, answers }
 }
 
@@ -208,7 +231,7 @@ async function buildHandoff($, messages, trigger, instructions) {
     saved = true
   } catch {}
 
-  const message = '[handoff-compact] This session was compacted. The handoff below replaces the earlier conversation' + (saved ? ' (saved at ' + path + ')' : '') + '.\n\n' + doc
+  const message = HANDOFF_PREFIX + ' This session was compacted. The handoff below replaces the earlier conversation' + (saved ? ' (saved at ' + path + ')' : '') + '.\n\n' + doc
   return { message, path: saved ? path : null, usage: fork.usage, autoContinue: adapter.autoContinue === true }
 }
 

@@ -42,6 +42,26 @@ test('an automatic compaction is answered with the forked handoff', async ($, on
   expect([...files.keys()].some(p => p.startsWith('/home/t/.claude/handoffs/sess-1-'))).toBe(true)
 })
 
+test('a second compaction carries the user prompts over from the first handoff', async ($, on) => {
+  stubs(on)
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'CORE', toolUses: [] }] }))
+  const first = (await $.session.compact({ trigger: 'auto', messages: MESSAGES })).messages[0].text
+  const later = [
+    { role: 'user', text: first, toolUses: [] },
+    { role: 'assistant', text: 'Continuing with the tests', toolUses: [] },
+    { role: 'user', text: 'Also update the docs', toolUses: [] },
+  ]
+  const second = (await $.session.compact({ trigger: 'auto', messages: later })).messages[0].text
+  const tail = second.slice(second.indexOf('## Last'))
+  expect(tail).toContain('> Rework the export') // from the first handoff
+  expect(tail).toContain('> And test it')
+  expect(tail).toContain('> Also update the docs')
+  expect(tail).toContain('- Tests pass') // an answer from before the first compaction
+  expect(tail).toContain('- Continuing with the tests')
+  expect(tail).not.toContain('[handoff-compact]') // the first handoff is not quoted as a prompt
+  expect(tail.indexOf('Rework the export')).toBeLessThan(tail.indexOf('Also update the docs'))
+})
+
 test('without an adapter the handoff says that no state files are listed', async ($, on) => {
   stubs(on)
   on('session.compact', () => ({ messages: [] }))

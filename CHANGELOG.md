@@ -13,6 +13,9 @@
 - `self`: the handoff always follows as a prompt; `autoContinue: never` asks only for an
   acknowledgement (0.1 started the next step regardless).
 - The handoff message names the saved file only if writing it succeeded.
+- Repeated compactions: the verbatim tail carries over the prompts and answers of the previous
+  handoff instead of quoting that handoff as the last "user prompt" (seen in the pilot from
+  the second compaction on: the user's own prompt was gone).
 
 ## 0.1.0 (unreleased)
 
