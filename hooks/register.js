@@ -186,6 +186,7 @@ function forkPrompt(sections, instructions) {
     'Write the handoff for this session NOW. It is about to replace the entire conversation;',
     'whatever it leaves out is gone afterwards. Use no tools, reply with the handoff only.',
     'Prefer exact paths, commands, commit hashes and numbers over descriptions.',
+    'The latest user message wins: if it changes the task or the plan, the next step follows it.',
     'Write in the language the conversation is in.',
     '',
     'Outline. Every section must appear, with "nothing" if that is the answer:',
