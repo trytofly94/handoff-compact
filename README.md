@@ -5,10 +5,10 @@ compaction with a **structured handoff**. When a long session fills up, the conv
 replaced by one message that says what the goal is, what is done and how that is proven,
 what comes next, which decisions were made and why, and which approaches were ruled out.
 
-> **Status: 0.1, not yet tested against a live session.** It needs Claude Code 2.1.287 or
-> later with mods enabled. It passes `claude plugin validate --strict`, and its logic has
-> been checked against a simulated event chain. The real tests in `tests/` run with
-> `claude plugin test`.
+> **Status: 0.2, piloted on one live session.** It needs Claude Code 2.1.287 or later with
+> mods enabled. It passes `claude plugin validate --strict` and the tests in `tests/`
+> (`claude plugin test`). The pilot ran 0.1's self-triggered path end to end; 0.2 makes
+> Claude Code's own trigger the default (see [Triggers](#triggers)).
 
 ## Why
 
@@ -23,10 +23,8 @@ warning, and still ends in a second, generic summary.
 
 ## How it works
 
-1. **Trigger.** Claude Code measures the context after every response, also in the middle of
-   a turn. Once the fill crosses `threshold` % of the compact window, the mod compacts as soon
-   as the main turn ends with an answer (not after a subagent's turn, an interrupt or an
-   error). It also handles `/compact` and Claude Code's own automatic compaction,
+1. **Trigger.** Claude Code compacts when the context reaches its compact window, or when
+   you run `/compact`. The mod answers that compaction instead of Claude Code's summarizer,
    so every compaction goes through the same path.
 2. **Handoff.** A *fork* of the session (`$.model.fork`) writes the handoff along a fixed
    outline. The fork reads the conversation from the prompt cache and has no tools, so the
@@ -70,16 +68,31 @@ claude plugin test                 # tests/*.test.ts, needs mods enabled
 bash tests/offline/run.sh          # logic only, simulated hook chain, needs Node
 ```
 
+## Triggers
+
+`trigger: core` (default): Claude Code decides when, at its compact window. Set the window
+with `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or `autoCompactWindow` in your settings. The handoff
+replaces Claude Code's summary, so a compaction costs one model call: the fork.
+
+`trigger: self`: the mod decides, at `threshold` % of `window`. Claude Code measures the
+context after every response, also in the middle of a turn, while a compaction is only
+allowed between turns. So the mod compacts once the main turn ends with an answer (not after
+a subagent's turn, an interrupt or an error). The catch: Claude Code does not run a plugin's
+own `session.compact` hook for a compaction that plugin started. Claude Code therefore writes
+its own summary as well, and the handoff follows as the next prompt. That costs a second
+summary and leaves both in the context. Use it only where you can't set Claude Code's window.
+
 ## Options
 
 Set them in `/plugin` → configure, in `/config`, or in `pluginConfigs` in your settings.
 
 | Option | Default | What it does |
 |---|---|---|
-| `threshold` | `70` | Compact at this % of the compact window |
-| `window` | `0` (auto) | Compact window in tokens. Auto order: adapter, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow` in `~/.claude/settings.json`, the model's context window |
+| `trigger` | `core` | `core` (Claude Code decides when) or `self` (the mod does), see [Triggers](#triggers) |
+| `threshold` | `70` | `self` only: compact at this % of the compact window |
+| `window` | `0` (auto) | `self` only: compact window in tokens. Auto order: adapter, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `autoCompactWindow` in `~/.claude/settings.json`, the model's context window |
 | `keepVerbatim` | `10` | Latest prompts and answers copied word for word |
-| `autoContinue` | `never` | `never`, `always`, or `adapter` (the adapter decides per session). Applies to compactions the mod starts itself |
+| `autoContinue` | `never` | `self` only: `never`, `always`, or `adapter` (the adapter decides per session). The handoff always follows as a prompt; with `never` that prompt asks only for an acknowledgement. Claude Code's own compactions continue the turn anyway |
 | `precompute` | `skip` | `skip` turns off Claude Code's background pre-compaction, `core` leaves it on |
 | `handoffDir` | `~/.claude/handoffs` | Where handoff files are saved |
 | `outlineFile` | built-in | Text file with the sections every handoff must have, one per line |
@@ -101,8 +114,8 @@ The mod calls it with JSON on stdin and reads JSON from stdout:
   "trigger": null, "context": { "tokens": 151000, "window": 1000000, "percent": 15 } }
 ```
 
-`phase` is `check` after a turn (the answer is cached for 5 minutes) or `compact` while the
-handoff is being written. Every field of the answer is optional:
+`phase` is `check` after each response with `trigger: self` (the answer is cached for 5
+minutes) or `compact` while the handoff is being written. Every field of the answer is optional:
 
 ```jsonc
 // stdout
@@ -135,9 +148,9 @@ decision in its own function with a comment saying what it decides. After a chan
   but nothing is drawn.
 - The handoff costs one fork per compaction. That is mostly cache reads plus the handoff's
   own output, about the cost of the summary Claude Code would otherwise write.
-- A compaction the mod starts happens between turns. If a new turn starts while the fork is
-  writing, the attempt is dropped and retried at the end of a later turn (at the earliest two
-  minutes on).
+- With `trigger: self`, a compaction happens between turns. If a new turn starts while the
+  fork is writing, the attempt is dropped and retried at the end of a later turn (at the
+  earliest two minutes on).
 
 ## License
 

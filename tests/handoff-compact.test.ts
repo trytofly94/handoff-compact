@@ -14,16 +14,16 @@ const FORK = {
   usage: { input_tokens: 1, output_tokens: 50, cache_read_input_tokens: 90000, cache_creation_input_tokens: 0 },
 }
 
-function stubs(on, opts: { fork?: any; adapterOut?: string } = {}) {
+function stubs(on, opts: { fork?: any; adapterOut?: string; writeFails?: boolean; logs?: string[] } = {}) {
   const files = new Map<string, string>()
   on('env.get', ($, e) => ({ value: ({ HOME: '/home/t' } as Record<string, string>)[e.name] }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('model.fork', () => ({ value: opts.fork === undefined ? FORK : opts.fork }))
   on('fs.exists', () => ({ value: false }))
-  on('fs.write', ($, e) => { files.set(e.path, e.text); return { value: undefined } })
+  on('fs.write', ($, e) => { if (opts.writeFails) throw new Error('read-only'); files.set(e.path, e.text); return { value: undefined } })
   on('process.run', ($, e) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'mkdir' ? '' : (opts.adapterOut ?? '{}'), stderr: '' } }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', ($, e) => { opts.logs?.push(e.text); return { value: undefined } })
   return files
 }
 
@@ -73,18 +73,39 @@ test("a subagent's compaction goes to Claude Code unchanged", async ($, on) => {
   expect(r.messages[0].text).toBe('CORE')
 })
 
-// ── Compacting on our own: the threshold is measured mid-turn, the compaction waits for the turn's end ──
+// ── trigger: core (default) — Claude Code decides when; the mod does not measure ──
 
-const OWN = { options: { threshold: 50, window: 100000 } }
+test('by default the mod does not compact on its own', async ($, on) => {
+  // Everything a self-triggered compaction would need is stubbed, so only the
+  // trigger decides.
+  const { clock, seen } = own(on)
+  await $.session.measure({ ...MEASURE, context: { tokens: 990000, window: 1000000, percent: 99 } })
+  await $.turn.complete(END)
+  await clock.advance(0)
+  expect(seen.compacts).toHaveLength(0)
+  expect(seen.submits).toHaveLength(0)
+})
+
+test('the message names no file when saving the handoff failed', async ($, on) => {
+  stubs(on, { writeFails: true })
+  on('session.compact', () => ({ messages: [] }))
+  const r = await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  expect(r.messages[0].text).toContain('1. GOAL: rework the export')
+  expect(r.messages[0].text).not.toContain('saved at')
+})
+
+// ── trigger: self — measured mid-turn, compacted when the main turn ends ──
+
+const SELF = { trigger: 'self', threshold: 50, window: 100000 }
 const MEASURE = { context: { tokens: 60000, window: 1000000, percent: 6 }, rateLimits: [], changed: ['context'] }
 const END = { answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' }
 
 function own(on) {
   const clock = mock.clock(on)
-  const seen = { compacts: 0, submits: [] as string[] }
-  stubs(on)
+  const seen = { compacts: [] as string[], submits: [] as string[], logs: [] as string[] }
+  stubs(on, { logs: seen.logs })
   on('session.messages', () => ({ value: MESSAGES }))
-  on('session.compact', () => { seen.compacts++; return { messages: [{ role: 'user', text: 'CORE', toolUses: [] }] } })
+  on('session.compact', ($, e) => { seen.compacts.push(e.instructions ?? ''); return { messages: [{ role: 'user', text: 'CORE', toolUses: [] }] } })
   on('prompt.submit', ($, e) => { seen.submits.push(e.text); return { text: e.text } })
   on('ui.toast', () => ({ value: undefined }))
   on('session.measure', ($, e) => ({ changed: e.changed }))
@@ -92,34 +113,56 @@ function own(on) {
   return { clock, seen }
 }
 
-test('crossing the threshold mid-turn compacts only once the main turn ends', OWN, async ($, on) => {
+test('crossing the threshold mid-turn compacts only once the main turn ends', { options: SELF }, async ($, on) => {
   const { clock, seen } = own(on)
   await $.session.measure(MEASURE)
   await clock.advance(0)
-  expect(seen.compacts).toBe(0)
+  expect(seen.compacts).toHaveLength(0)
   await $.turn.complete({ ...END, agentId: 'a1' }) // a subagent's turn
   await clock.advance(0)
-  expect(seen.compacts).toBe(0)
+  expect(seen.compacts).toHaveLength(0)
   await $.turn.complete(END)
   await clock.advance(0)
-  expect(seen.compacts).toBe(1)
+  expect(seen.compacts).toEqual(['']) // with a handoff: no instructions for Claude Code's summary
 })
 
-test('an interrupted turn does not compact; the next answered one does', OWN, async ($, on) => {
+test('an interrupted turn does not compact; the next answered one does', { options: SELF }, async ($, on) => {
   const { clock, seen } = own(on)
   await $.session.measure(MEASURE)
   await $.turn.complete({ ...END, reason: 'aborted', isAborted: true })
   await clock.advance(0)
-  expect(seen.compacts).toBe(0)
+  expect(seen.compacts).toHaveLength(0)
   await $.turn.complete({ ...END, turnId: 't2' })
   await clock.advance(0)
-  expect(seen.compacts).toBe(1)
+  expect(seen.compacts).toHaveLength(1)
 })
 
-test('below the threshold a turn end does not compact', OWN, async ($, on) => {
+test('below the threshold a turn end does not compact', { options: SELF }, async ($, on) => {
   const { clock, seen } = own(on)
   await $.session.measure({ ...MEASURE, context: { tokens: 40000, window: 1000000, percent: 4 } })
   await $.turn.complete(END)
   await clock.advance(0)
-  expect(seen.compacts).toBe(0)
+  expect(seen.compacts).toHaveLength(0)
+})
+
+// Claude Code skips the mod's own session.compact hook for a compaction the mod
+// raised: Claude Code summarizes, and the handoff follows as the next prompt.
+test('self, autoContinue never: the handoff follows, with the instruction to wait', { options: SELF }, async ($, on) => {
+  const { clock, seen } = own(on)
+  await $.session.measure(MEASURE)
+  await $.turn.complete(END)
+  await clock.advance(0)
+  expect(seen.logs).toEqual([])
+  expect(seen.submits).toHaveLength(1)
+  expect(seen.submits[0]).toContain('1. GOAL: rework the export')
+  expect(seen.submits[0]).toContain('wait for the next instruction')
+})
+
+test('self, autoContinue always: the handoff follows, with its next step', { options: { ...SELF, autoContinue: 'always' } }, async ($, on) => {
+  const { clock, seen } = own(on)
+  await $.session.measure(MEASURE)
+  await $.turn.complete(END)
+  await clock.advance(0)
+  expect(seen.submits).toHaveLength(1)
+  expect(seen.submits[0]).toContain('carry on with its NEXT STEP')
 })

@@ -1,15 +1,33 @@
 {
   "name": "handoff-compact",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Replaces Claude Code's compaction with a structured handoff: a fork of the session writes it from the prompt cache, and the conversation continues from exactly that handoff.",
-  "author": { "name": "trytofly94" },
+  "author": {
+    "name": "trytofly94"
+  },
   "license": "MIT",
-  "keywords": ["mod", "compact", "handoff", "context", "tokens"],
+  "keywords": [
+    "mod",
+    "compact",
+    "handoff",
+    "context",
+    "tokens"
+  ],
   "userConfig": {
+    "trigger": {
+      "type": "string",
+      "title": "Who decides when to compact",
+      "description": "core = Claude Code, at its compact window; every compaction is answered with the handoff (one model call). self = this mod, at threshold % of the window, after the turn; Claude Code then writes its own summary too and the handoff follows as a message.",
+      "default": "core",
+      "options": [
+        "core",
+        "self"
+      ]
+    },
     "threshold": {
       "type": "number",
       "title": "Threshold (%)",
-      "description": "Compact once the context fills this share of the compact window.",
+      "description": "trigger self only: compact once the context fills this share of the compact window.",
       "default": 70,
       "min": 20,
       "max": 95
@@ -17,7 +35,7 @@
     "window": {
       "type": "number",
       "title": "Compact window (tokens)",
-      "description": "0 = automatic: adapter, then CLAUDE_CODE_AUTO_COMPACT_WINDOW, then autoCompactWindow in settings.json, then the model's context window.",
+      "description": "trigger self only. 0 = automatic: adapter, then CLAUDE_CODE_AUTO_COMPACT_WINDOW, then autoCompactWindow in settings.json, then the model's context window.",
       "default": 0,
       "min": 0,
       "max": 1000000
@@ -33,7 +51,7 @@
     "autoContinue": {
       "type": "string",
       "title": "Continue after compacting",
-      "description": "never | always | adapter (the adapter decides per session). Applies to compactions this mod starts itself.",
+      "description": "trigger self only: never | always | adapter (the adapter decides per session). Claude Code's own compactions continue the turn anyway.",
       "default": "never"
     },
     "precompute": {

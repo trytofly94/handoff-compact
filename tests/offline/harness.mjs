@@ -16,7 +16,9 @@ export function makeHost({ root = '/dev/mods/x', env = {}, fork, compactCore, fi
     session: {
       id: async () => 'sess-1', cwd: async () => '/work', model: async () => 'opus',
       messages: async () => [{ role: 'user', text: 'Mach X', toolUses: [] }, { role: 'assistant', text: 'X erledigt', toolUses: [] }],
-      compact: async args => fire('session.compact', { trigger: 'plugin', messages: [{ role: 'user', text: 'Mach X', toolUses: [] }], ...args }, compactCore),
+      // Like Claude Code: a compaction a plugin raises skips that plugin's own
+      // session.compact hook (the only plugin here), so core answers it.
+      compact: async args => compactCore({ trigger: 'plugin', messages: [{ role: 'user', text: 'Mach X', toolUses: [] }], ...args }),
     },
     fs: {
       write: async (p, t) => { files.set(p, t) }, read: async p => { if (!files.has(p)) throw new Error('ENOENT ' + p); return files.get(p) }, exists: async p => files.has(p),

@@ -6,15 +6,20 @@
 // the approaches already ruled out, the exact command that proves the state.
 //
 // This mod answers the compaction itself:
-//   1. Once the context fills `threshold` % of the compact window (or whenever
-//      Claude Code compacts on its own, or you run /compact), a FORK of the
-//      session writes a handoff along a fixed outline. The fork reads the
-//      conversation from the prompt cache and has no tools.
+//   1. Whenever Claude Code compacts (automatically, at its compact window, or
+//      because you ran /compact), a FORK of the session writes a handoff along
+//      a fixed outline. The fork reads the conversation from the prompt cache
+//      and has no tools.
 //   2. The last N prompts and answers are added word for word, plus the paths
 //      of files that hold the project's state (from the optional adapter).
 //   3. The conversation is replaced by that one handoff message. The handoff is
 //      also saved as a Markdown file.
-//   4. Optionally the session continues on its own.
+//   4. With `trigger: self` the mod also decides WHEN: at `threshold` % of the
+//      compact window, after the turn. Claude Code then skips this mod's own
+//      session.compact hook (it raised the event itself), so Claude Code writes
+//      its summary and the handoff follows as the next message: two summaries.
+//      Hence the default `core`: let Claude Code trigger, answer with the handoff.
+//      Optionally the session continues on its own after a self-triggered one.
 //
 // Safety net: if the fork fails (cold cache, API error) the mod hands the
 // compaction back to Claude Code, with the outline as instructions. If this
@@ -43,14 +48,16 @@ const CONTINUE_TEXT =
   'The session was compacted; the handoff above replaces the earlier conversation. ' +
   'Read the state files it lists first, then carry on with its NEXT STEP.'
 
+const WAIT_TEXT =
+  'The session was compacted; the handoff above replaces the earlier conversation. ' +
+  'Reply only with "Handoff read." and wait for the next instruction.'
+
 const ADAPTER_CACHE_MS = 5 * 60 * 1000
 
-let opts = { threshold: 70, window: 0, keepVerbatim: 10, autoContinue: 'never', precompute: 'skip', handoffDir: '', outlineFile: '', adapter: '' }
+let opts = { trigger: 'core', threshold: 70, window: 0, keepVerbatim: 10, autoContinue: 'never', precompute: 'skip', handoffDir: '', outlineFile: '', adapter: '' }
 let armed = true // false while a compaction this mod started is running
 let due = false // the threshold was crossed; compact when the main turn ends
 let cooldownUntil = 0 // after a failed attempt, don't retry on every turn
-let pending = null // handoff built by run(), installed by the session.compact hook
-let consumed = false // did the session.compact hook install `pending`?
 let adapterCache = null // { at, value } from the last 'check' call
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
@@ -194,13 +201,15 @@ async function buildHandoff($, messages, trigger, instructions) {
   // message below still carries the handoff, so this doesn't abort.
   const dir = expandHome(opts.handoffDir, home) || home + '/.claude/handoffs'
   const path = dir + '/' + id + '-' + now.replace(/[:.]/g, '-') + '.md'
+  let saved = false
   try {
     await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5000 })
     await $.fs.write(path, doc + '\n')
+    saved = true
   } catch {}
 
-  const message = '[handoff-compact] This session was compacted. The handoff below replaces the earlier conversation (saved at ' + path + ').\n\n' + doc
-  return { message, path, usage: fork.usage, autoContinue: adapter.autoContinue === true }
+  const message = '[handoff-compact] This session was compacted. The handoff below replaces the earlier conversation' + (saved ? ' (saved at ' + path + ')' : '') + '.\n\n' + doc
+  return { message, path: saved ? path : null, usage: fork.usage, autoContinue: adapter.autoContinue === true }
 }
 
 // Whether to start the next turn by itself after a compaction this mod started.
@@ -214,29 +223,30 @@ function shouldContinue(handoff) {
 async function run($) {
   try {
     const handoff = await buildHandoff($, await $.session.messages(), 'plugin')
-    pending = handoff
-    consumed = false
+    // Claude Code skips this mod's own session.compact hook for a compaction
+    // the mod raised, so Claude Code summarizes; without a handoff, at least
+    // along the outline.
     const r = await $.session.compact(handoff ? {} : { instructions: (await outline($)).join('\n') })
     if (r && r.skip) {
       $.ui.log('handoff-compact: compaction refused: ' + r.skip, { to: 'debug' })
       cooldownUntil = Date.now() + 10 * 60 * 1000
       return
     }
-    // If our own session.compact hook did not answer (Claude Code summarized
-    // instead), deliver the handoff as the next message so it isn't lost.
-    if (handoff && !consumed) {
-      $.prompt.submit({ text: handoff.message + '\n\n' + CONTINUE_TEXT })
+    // The handoff follows the summary as the next prompt, so it isn't lost. A
+    // prompt always starts a turn; without autoContinue that turn only
+    // acknowledges it.
+    if (handoff) {
+      $.prompt.submit({ text: handoff.message + '\n\n' + (shouldContinue(handoff) ? CONTINUE_TEXT : WAIT_TEXT) })
+      $.ui.toast('Compacted into a handoff' + (handoff.path ? ': ' + handoff.path : ''))
     } else if (shouldContinue(handoff)) {
       $.prompt.submit({ text: CONTINUE_TEXT })
     }
-    if (handoff) $.ui.toast('Compacted into a handoff: ' + handoff.path)
   } catch (err) {
     // Typically a new turn had already started (compact refuses then).
-    // Try again on a later measurement, not on every turn.
+    // Try again at a later turn end, not on every turn.
     $.ui.log('handoff-compact: ' + String(err), { to: 'debug' })
     cooldownUntil = Date.now() + 2 * 60 * 1000
   } finally {
-    pending = null
     armed = true
   }
 }
@@ -244,9 +254,29 @@ async function run($) {
 export function register(on, options) {
   opts = { ...opts, ...(options || {}) }
 
-  // Claude Code measures the context after every response, i.e. also in the
-  // middle of a turn, while $.session.compact() is refused. So the measurement
-  // only marks the compaction as due; turn.complete starts it.
+  if (opts.trigger === 'self') registerSelfTrigger(on)
+
+  // Every compaction passes here: Claude Code's own, /compact, and (from
+  // another plugin's call) a plugin's. Not one this mod raised itself.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId) return next(e) // subagents compact their own transcript the usual way
+    if (e.trigger === 'precompute') {
+      return opts.precompute === 'core' ? next(e) : { skip: 'handoff-compact writes the handoff at compaction time' }
+    }
+    const handoff = await buildHandoff($, e.messages, e.trigger, e.instructions)
+    if (!handoff) {
+      const sections = (await outline($)).join('\n')
+      const instructions = e.instructions ? e.instructions + '\n\n' + sections : 'Structure the summary exactly along these sections:\n' + sections
+      return next({ ...e, instructions })
+    }
+    return { messages: [{ role: 'user', text: handoff.message, toolUses: [] }] }
+  })
+}
+
+// trigger: self. Claude Code measures the context after every response, i.e.
+// also in the middle of a turn, while $.session.compact() is refused. So the
+// measurement only marks the compaction as due; turn.complete starts it.
+function registerSelfTrigger(on) {
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     if (!armed || due || Date.now() < cooldownUntil) return result
@@ -270,22 +300,5 @@ export function register(on, options) {
     // Not inside this hook: the turn still ends through it.
     $.clock.after(0, () => run($))
     return result
-  })
-
-  // Every compaction passes here: ours, /compact, and Claude Code's own.
-  on('session.compact', async ($, e, next) => {
-    if (e.agentId) return next(e) // subagents compact their own transcript the usual way
-    if (e.trigger === 'precompute') {
-      return opts.precompute === 'core' ? next(e) : { skip: 'handoff-compact writes the handoff at compaction time' }
-    }
-    let handoff = pending
-    if (handoff) consumed = true
-    else handoff = await buildHandoff($, e.messages, e.trigger, e.instructions)
-    if (!handoff) {
-      const sections = (await outline($)).join('\n')
-      const instructions = e.instructions ? e.instructions + '\n\n' + sections : 'Structure the summary exactly along these sections:\n' + sections
-      return next({ ...e, instructions })
-    }
-    return { messages: [{ role: 'user', text: handoff.message, toolUses: [] }] }
   })
 }
