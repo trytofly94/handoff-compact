@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 const MESSAGES = [
   { role: 'user', text: 'Rework the export', toolUses: [] },
   { role: 'assistant', text: 'Reading export.sh first', toolUses: [] },
-  { role: 'user', text: '', toolUses: [], toolResults: [{ id: 't1' }] },
+  { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't1', text: 'export.sh contents', isError: false }] },
   { role: 'user', text: 'And <system-reminder>internal</system-reminder>test it', toolUses: [] },
   { role: 'assistant', text: 'Tests pass', toolUses: [] },
 ]
@@ -52,7 +52,8 @@ test('without an adapter the handoff says that no state files are listed', async
 test('a failed fork hands the compaction back with the outline as instructions', async ($, on) => {
   stubs(on, { fork: null })
   let seen: string | undefined
-  on('session.compact', ($, e) => { seen = e.instructions; return { messages: [] } })
+  // Stands for Claude Code's own compaction: a compaction always leaves at least one message.
+  on('session.compact', ($, e) => { seen = e.instructions; return { messages: [{ role: 'user', text: 'CORE', toolUses: [] }] } })
   await $.session.compact({ trigger: 'manual', instructions: 'stress the tests', messages: MESSAGES })
   expect(seen).toContain('stress the tests')
   expect(seen).toContain('9. VERIFY')
