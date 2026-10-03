@@ -236,6 +236,15 @@ async function buildHandoff($, messages, trigger, instructions) {
   return { message, path: saved ? path : null, usage: fork.usage, autoContinue: adapter.autoContinue === true }
 }
 
+// "/compact classic [what to stress]": Claude Code's own summary, this once.
+// Only for the person's /compact, and the keyword has to come first and stand
+// alone, so "/compact classical music" is a normal handoff.
+function classicRequest(e) {
+  if (e.trigger !== 'manual' || typeof e.instructions !== 'string') return null
+  const m = /^\s*classic(?:\s+([\s\S]*))?$/i.exec(e.instructions)
+  return m ? { rest: (m[1] || '').trim() } : null
+}
+
 // Whether to start the next turn by itself after a compaction this mod started.
 function shouldContinue(handoff) {
   if (opts.autoContinue === 'always') return true
@@ -286,6 +295,11 @@ export function register(on, options) {
     if (e.agentId) return next(e) // subagents compact their own transcript the usual way
     if (e.trigger === 'precompute') {
       return opts.precompute === 'core' ? next(e) : { skip: 'handoff-compact writes the handoff at compaction time' }
+    }
+    const classic = classicRequest(e)
+    if (classic) {
+      const { instructions, ...plain } = e
+      return next(classic.rest ? { ...e, instructions: classic.rest } : plain)
     }
     const handoff = await buildHandoff($, e.messages, e.trigger, e.instructions)
     if (!handoff) {

@@ -79,6 +79,48 @@ test('a failed fork hands the compaction back with the outline as instructions',
   expect(seen).toContain('9. VERIFY')
 })
 
+// ── /compact classic: Claude Code's own summary, this once ──
+
+function core(on) {
+  const seen = { calls: 0, instructions: [] as (string | undefined)[] }
+  on('session.compact', ($, e) => { seen.calls++; seen.instructions.push(e.instructions); return { messages: [{ role: 'user', text: 'CORE', toolUses: [] }] } })
+  return seen
+}
+
+test('/compact classic goes to Claude Code without a fork and without instructions', async ($, on) => {
+  stubs(on, { fork: { text: 'MUST NOT BE USED', usage: FORK.usage } })
+  const seen = core(on)
+  const r = await $.session.compact({ trigger: 'manual', instructions: 'classic', messages: MESSAGES })
+  expect(r.messages[0].text).toBe('CORE')
+  expect(seen.instructions).toEqual([undefined])
+})
+
+test('/compact classic <text> passes the rest on as instructions', async ($, on) => {
+  stubs(on)
+  const seen = core(on)
+  const r = await $.session.compact({ trigger: 'manual', instructions: '  Classic   keep the test plan\nand the commit list', messages: MESSAGES })
+  expect(r.messages[0].text).toBe('CORE')
+  expect(seen.instructions).toEqual(['keep the test plan\nand the commit list'])
+})
+
+test('"classical" or "classic" later in the text is a normal handoff', async ($, on) => {
+  stubs(on)
+  const seen = core(on)
+  for (const instructions of ['classical music', 'stress the classic parts']) {
+    const r = await $.session.compact({ trigger: 'manual', instructions, messages: MESSAGES })
+    expect(r.messages[0].text).toMatch(/^\[handoff-compact\]/)
+  }
+  expect(seen.calls).toBe(0)
+})
+
+test('the keyword counts only for /compact, not for a compaction a plugin asks for', async ($, on) => {
+  stubs(on)
+  const seen = core(on)
+  const r = await $.session.compact({ trigger: 'plugin', instructions: 'classic', messages: MESSAGES })
+  expect(r.messages[0].text).toMatch(/^\[handoff-compact\]/)
+  expect(seen.calls).toBe(0)
+})
+
 test('pre-compaction is skipped by default', async ($, on) => {
   stubs(on)
   on('session.compact', () => ({ messages: [] }))

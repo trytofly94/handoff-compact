@@ -16,6 +16,8 @@
 - Repeated compactions: the verbatim tail carries over the prompts and answers of the previous
   handoff instead of quoting that handoff as the last "user prompt" (seen in the pilot from
   the second compaction on: the user's own prompt was gone).
+- `/compact classic [instructions]`: Claude Code's own summary for this one compaction, the
+  rest of the text as its instructions. Only for `/compact`, only as the first word.
 - The fork prompt says that the latest user message wins: in the pilot a compaction right
   after "stop reading" still planned "keep reading" as the next step.
 

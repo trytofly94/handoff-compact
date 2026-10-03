@@ -82,6 +82,14 @@ own `session.compact` hook for a compaction that plugin started. Claude Code the
 its own summary as well, and the handoff follows as the next prompt. That costs a second
 summary and leaves both in the context. Use it only where you can't set Claude Code's window.
 
+## Claude Code's own summary, once
+
+`/compact classic` compacts this one time the way Claude Code does without the mod: its own
+summary, no fork. Anything after the keyword goes to Claude Code as usual, e.g.
+`/compact classic keep the test plan`. The keyword only counts for `/compact` and only as the
+first word, so `/compact classical music` still gets a handoff. To switch the mod off for
+good, disable it in `/plugin`.
+
 ## Options
 
 Set them in `/plugin` → configure, in `/config`, or in `pluginConfigs` in your settings.
