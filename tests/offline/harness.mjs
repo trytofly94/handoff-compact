@@ -23,7 +23,7 @@ export function makeHost({ root = '/dev/mods/x', env = {}, fork, compactCore, fi
     fs: {
       write: async (p, t) => { files.set(p, t) }, read: async p => { if (!files.has(p)) throw new Error('ENOENT ' + p); return files.get(p) }, exists: async p => files.has(p),
     },
-    process: { run: async (argv, init) => { log.runs.push(argv); if (argv[0] === '/adapter') return { exitCode: 0, stdout: adapterOut(JSON.parse(init.stdin)), stderr: '' }; if (argv[0] === 'mv') { files.set(argv[3], files.get(argv[2])); files.delete(argv[2]) } return { exitCode: 0, stdout: argv[1]?.endsWith('compact-state-files.sh') ? 'sitrep\t/state/board\n' : '', stderr: '' } } },
+    process: { run: async (argv, init) => { log.runs.push(argv); if (argv[0] === '/adapter') return { exitCode: 0, stdout: adapterOut(JSON.parse(init.stdin)), stderr: '' }; if (argv[0] === 'mv') { files.set(argv[3], files.get(argv[2])); files.delete(argv[2]) } return { exitCode: 0, stdout: '', stderr: '' } } },
     model: { fork: async () => fork },
     clock: { after: (ms, fn) => { timers.push(fn); return { cancel() {} } } },
     ui: { log: (t) => log.logs.push(t), toast: t => log.toasts.push(t) },

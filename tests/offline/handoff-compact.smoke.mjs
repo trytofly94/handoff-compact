@@ -6,20 +6,20 @@ const fork = { text: '1. GOAL: X\n9. VERIFY: make test', usage: { output_tokens:
 const core = e => ({ messages: [{ role: 'user', text: 'CORE:' + (e.instructions || '') }] })
 const end = async h => { await h.fire('turn.complete', { reason: 'answer', answer: '', turnId: 't' }, () => ({ text: '' })); await h.flush() }
 const load = async () => (await import(S + '/' + MOD + '?' + (n++))).register
-const OPTS = { trigger: 'self', threshold: 70, window: 0, keepVerbatim: 10, autoContinue: 'adapter', precompute: 'skip', handoffDir: '~/.local/state/cc/handoff', outlineFile: '', adapter: '/adapter' }
+const OPTS = { trigger: 'self', threshold: 70, window: 0, keepVerbatim: 10, autoContinue: 'adapter', precompute: 'skip', handoffDir: '~/handoffs', outlineFile: '', adapter: '/adapter' }
 
 // 1) With an adapter: window, state files and the continue decision come from it
 {
   const calls = []
-  const h = makeHost({ env: { HOME: '/h' }, fork, compactCore: core, adapterOut: i => { calls.push(i.phase); return JSON.stringify(i.phase === 'compact' ? { window: '200k', autoContinue: true, stateFiles: [{ label: 'sitrep', path: '/state/board' }] } : { window: '200k' }) } })
+  const h = makeHost({ env: { HOME: '/h' }, fork, compactCore: core, adapterOut: i => { calls.push(i.phase); return JSON.stringify(i.phase === 'compact' ? { window: '200k', autoContinue: true, stateFiles: [{ label: 'plan', path: '/work/PLAN.md' }] } : { window: '200k' }) } })
   ;(await load())(h.on, OPTS)
   await h.fire('session.measure', { context: { tokens: 100000, window: 1000000 } }, e => e); await end(h)
   ok(h.log.submits.length === 0, 'adapter: 50 % of 200k → nothing happens')
   await h.fire('session.measure', { context: { tokens: 150000, window: 1000000 } }, e => e)
   ok(h.log.submits.length === 0 && h.files.size === 0, 'adapter: 75 % mid-turn → nothing yet')
   await end(h)
-  const hf = [...h.files.keys()].find(k => k.startsWith('/h/.local/state/cc/handoff/sess-1-'))
-  ok(!!hf && h.files.get(hf).includes('- sitrep: /state/board'), 'adapter: 75 % → handoff in handoffDir, with state file')
+  const hf = [...h.files.keys()].find(k => k.startsWith('/h/handoffs/sess-1-'))
+  ok(!!hf && h.files.get(hf).includes('- plan: /work/PLAN.md'), 'adapter: 75 % → handoff in handoffDir, with state file')
   ok(h.log.submits.length === 1 && h.log.submits[0].startsWith('[handoff-compact]') && h.log.submits[0].includes('carry on with its NEXT STEP'), 'adapter: autoContinue=true → the handoff follows as one prompt, with its next step')
   ok(calls.filter(c => c === 'check').length === 1, 'adapter: check answer cached for 5 min (1 call for 2 measurements)')
 }

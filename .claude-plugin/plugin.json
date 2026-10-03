@@ -1,6 +1,6 @@
 {
   "name": "handoff-compact",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Replaces Claude Code's compaction with a structured handoff: a fork of the session writes it from the prompt cache, and the conversation continues from exactly that handoff.",
   "author": {
     "name": "trytofly94"

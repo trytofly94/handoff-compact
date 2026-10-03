@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2026-10-03)
+
+- Tests only: the offline smoke test and its harness used paths and names from the author's
+  own setup as examples. They are neutral now (`~/handoffs`, a `PLAN.md` state file); the
+  harness no longer simulates a helper script the mod never calls. No change to the mod.
+
 ## 0.2.0 (2026-10-03)
 
 - New option `trigger`, default `core`: Claude Code decides when to compact, and the handoff
