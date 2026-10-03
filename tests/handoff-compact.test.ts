@@ -62,6 +62,33 @@ test('a second compaction carries the user prompts over from the first handoff',
   expect(tail.indexOf('Rework the export')).toBeLessThan(tail.indexOf('Also update the docs'))
 })
 
+test('a handoff quoted as a prompt by an older version is not carried over', async ($, on) => {
+  stubs(on)
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'CORE', toolUses: [] }] }))
+  const old = [
+    '[handoff-compact] This session was compacted. The handoff below replaces the earlier conversation.',
+    '',
+    '# Handoff 2026-10-02T11:45:30.597Z (auto)',
+    '1. GOAL: read the docs',
+    '',
+    '## Last 2 user prompts (verbatim, oldest first)',
+    '> [handoff-compact] This session was compacted. The handoff below replaces',
+    '> ',
+    '> # Handoff 2026-10-02T11:43:25.466Z (auto)',
+    '',
+    '> Stop reading now',
+    '',
+    '## Last 1 answers (shortened, oldest first)',
+    '- Reading on from line 6001',
+  ].join('\n')
+  const r = await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: old, toolUses: [] }] })
+  const tail = r.messages[0].text.slice(r.messages[0].text.indexOf('## Last'))
+  expect(tail).toContain('## Last 1 user prompts')
+  expect(tail).toContain('> Stop reading now')
+  expect(tail).not.toContain('[handoff-compact]')
+  expect(tail).toContain('- Reading on from line 6001')
+})
+
 test('without an adapter the handoff says that no state files are listed', async ($, on) => {
   stubs(on)
   on('session.compact', () => ({ messages: [] }))

@@ -172,7 +172,8 @@ function carriedTail(text) {
     .slice(p.index + p[0].length, a.index)
     .split(/\n\s*\n/)
     .map(block => block.split('\n').filter(l => l.startsWith('>')).map(l => l.replace(/^> ?/, '')).join('\n').trim())
-    .filter(Boolean)
+    // A handoff that 0.1 quoted as a prompt is no prompt of the user's either.
+    .filter(t => t && !t.startsWith(HANDOFF_PREFIX))
   const answers = text
     .slice(a.index + a[0].length)
     .split('\n')
