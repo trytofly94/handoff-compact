@@ -1,3 +1,5 @@
 .claude-plugin/types/
+# written by Claude Code when it loads the folder with --plugin-dir; extends the types above
+tsconfig.json
 node_modules/
 .DS_Store

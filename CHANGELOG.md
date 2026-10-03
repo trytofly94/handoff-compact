@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-03)
 
 - New option `trigger`, default `core`: Claude Code decides when to compact, and the handoff
   replaces its summary (one model call). The mod's own threshold is now `trigger: self`.

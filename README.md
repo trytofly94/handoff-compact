@@ -5,10 +5,10 @@ compaction with a **structured handoff**. When a long session fills up, the conv
 replaced by one message that says what the goal is, what is done and how that is proven,
 what comes next, which decisions were made and why, and which approaches were ruled out.
 
-> **Status: 0.2, piloted on one live session.** It needs Claude Code 2.1.287 or later with
-> mods enabled. It passes `claude plugin validate --strict` and the tests in `tests/`
-> (`claude plugin test`). The pilot ran 0.1's self-triggered path end to end; 0.2 makes
-> Claude Code's own trigger the default (see [Triggers](#triggers)).
+> **Status: 0.2, piloted on a live session**: six automatic compactions in one long turn,
+> `/compact` and `/compact classic`. It needs Claude Code 2.1.287 or later with mods enabled
+> on your account. It passes `claude plugin validate --strict` and the tests in `tests/`
+> (`claude plugin test`).
 
 ## Why
 
